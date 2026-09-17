@@ -55,8 +55,62 @@ const isNativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && 
 
 const API_BASE = isNativeApp ? (localStorage.getItem('kitsunify_server_url') || 'https://kitsunify.onrender.com') : '';
 
+// ─── Inactivity Auto-Logout Security (15 min) ──────────────────
+const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutos
+let lastActivityTime = Date.now();
+
+function recordUserActivity() {
+  lastActivityTime = Date.now();
+  try {
+    localStorage.setItem('kitsunify_last_active', lastActivityTime.toString());
+  } catch (e) {}
+}
+
+// Activity event listeners
+['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'].forEach(evt => {
+  window.addEventListener(evt, recordUserActivity, { passive: true });
+});
+
+// Periodic heartbeat: check every 15 seconds
+setInterval(() => {
+  if (!authToken) return;
+
+  // Music playback protection: if user is actively listening, do not disconnect!
+  if (audioPlayer && !audioPlayer.paused && audioPlayer.currentTime > 0) {
+    recordUserActivity();
+    return;
+  }
+
+  const elapsed = Date.now() - lastActivityTime;
+  if (elapsed >= INACTIVITY_TIMEOUT_MS) {
+    console.warn(`[Seguridad] Sesión cerrada por inactividad (${Math.round(elapsed / 60000)} min sin actividad)`);
+    logout('inactivity');
+  }
+}, 15000);
+
+// App visibility change (returning to tab or unlocking mobile screen)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && authToken) {
+    const savedLastActive = parseInt(localStorage.getItem('kitsunify_last_active') || '0', 10);
+    const elapsed = Date.now() - (savedLastActive || lastActivityTime);
+
+    if (audioPlayer && !audioPlayer.paused && audioPlayer.currentTime > 0) {
+      recordUserActivity();
+      return;
+    }
+
+    if (savedLastActive && elapsed >= INACTIVITY_TIMEOUT_MS) {
+      console.warn('[Seguridad] Sesión cerrada al regresar tras inactividad');
+      logout('inactivity');
+    } else {
+      recordUserActivity();
+    }
+  }
+});
+
 // ─── Authenticated Fetch Helper ──────────────────────────────────
 async function authFetch(url, options = {}) {
+  recordUserActivity();
   const fullUrl = url.startsWith('/') ? `${API_BASE}${url}` : url;
   const headers = options.headers || {};
   if (authToken) {
@@ -83,6 +137,14 @@ async function checkAuth() {
     showAuthModal();
     return;
   }
+
+  // Check if session timed out while app was closed/minimized
+  const savedLastActive = parseInt(localStorage.getItem('kitsunify_last_active') || '0', 10);
+  if (savedLastActive && (Date.now() - savedLastActive >= INACTIVITY_TIMEOUT_MS)) {
+    logout('inactivity');
+    return;
+  }
+  recordUserActivity();
 
   try {
     const res = await fetch(`${API_BASE}/api/auth/me`, {
@@ -167,6 +229,7 @@ async function handleLogin() {
     authToken = data.token;
     currentUser = data.user;
     localStorage.setItem('kitsunify_token', authToken);
+    recordUserActivity();
 
     hideAuthModal();
     setupUserUI();
@@ -180,12 +243,25 @@ async function handleLogin() {
   }
 }
 
-function logout() {
+function logout(reason = null) {
   authToken = null;
   currentUser = null;
   localStorage.removeItem('kitsunify_token');
+  localStorage.removeItem('kitsunify_last_active');
+  if (audioPlayer) {
+    audioPlayer.pause();
+    audioPlayer.src = '';
+  }
+  nowPlaying.classList.remove('visible');
   showAuthModal();
-  showToast('Sesión cerrada', 'info');
+
+  if (reason === 'inactivity') {
+    authError.textContent = '🔒 Sesión cerrada automáticamente por inactividad (15 min).';
+    authError.style.display = 'block';
+    showToast('Sesión cerrada por inactividad', 'info');
+  } else {
+    showToast('Sesión cerrada', 'info');
+  }
 }
 
 if (authForm) {
@@ -406,7 +482,8 @@ function connectSSE() {
           progress: data.progress || 0,
           status: data.status,
           speed: data.speed || '',
-          eta: data.eta || ''
+          eta: data.eta || '',
+          error: data.error || ''
         });
 
         updateDownloadUI();
@@ -453,7 +530,7 @@ function updateDownloadUI() {
         case 'converting': statusText = 'Convirtiendo a MP3...'; break;
         case 'uploading': statusText = 'Subiendo a tu Bóveda Telegram ☁️...'; break;
         case 'completed': statusText = '✅ En tu Bóveda Privada'; break;
-        case 'error': statusText = '❌ Error'; break;
+        case 'error': statusText = dl.error ? `❌ ${escapeHtml(dl.error)}` : '❌ Error al procesar'; break;
       }
 
       allHtml += `

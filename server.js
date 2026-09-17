@@ -28,18 +28,71 @@ app.use((req, res, next) => {
 });
 
 // Configure FFmpeg path (support for Render and cloud hosts)
+let ffmpegPath = '';
 try {
   const ffmpeg = require('@ffmpeg-installer/ffmpeg');
   if (ffmpeg && ffmpeg.path) {
+    ffmpegPath = ffmpeg.path;
     const ffmpegDir = path.dirname(ffmpeg.path);
     const delimiter = process.platform === 'win32' ? ';' : ':';
     process.env.PATH = `${ffmpegDir}${delimiter}${process.env.PATH}`;
   }
 } catch (e) {}
 
-// Resolve yt-dlp binary (local bin/ or system PATH)
+// Resolve & auto-download yt-dlp binary
 const localYtdlp = path.join(__dirname, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
-const YTDLP_BIN = fs.existsSync(localYtdlp) ? localYtdlp : 'yt-dlp';
+let resolvedYtdlp = fs.existsSync(localYtdlp) ? localYtdlp : 'yt-dlp';
+
+async function ensureYtdlpBinary() {
+  if (fs.existsSync(localYtdlp) && fs.statSync(localYtdlp).size > 1000000) {
+    resolvedYtdlp = localYtdlp;
+    return resolvedYtdlp;
+  }
+
+  try {
+    const { execSync } = require('child_process');
+    execSync('yt-dlp --version', { stdio: 'ignore' });
+    resolvedYtdlp = 'yt-dlp';
+    return 'yt-dlp';
+  } catch (e) {}
+
+  console.log('[Kitsunify Engine] Descargando motor yt-dlp para la nube...');
+  try {
+    const binDir = path.dirname(localYtdlp);
+    if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
+
+    const isWin = process.platform === 'win32';
+    const url = isWin
+      ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+      : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Kitsunify/2.0)' },
+      redirect: 'follow'
+    });
+
+    if (res.ok) {
+      const { Readable } = require('stream');
+      const fileStream = fs.createWriteStream(localYtdlp);
+      await new Promise((resolve, reject) => {
+        Readable.fromWeb(res.body).pipe(fileStream);
+        fileStream.on('finish', resolve);
+        fileStream.on('error', reject);
+      });
+      try { fs.chmodSync(localYtdlp, 0o755); } catch (e) {}
+      const sizeMb = (fs.statSync(localYtdlp).size / (1024 * 1024)).toFixed(2);
+      console.log(`[Kitsunify Engine] ✅ Motor yt-dlp listo (${sizeMb} MB)`);
+      resolvedYtdlp = localYtdlp;
+      return localYtdlp;
+    }
+  } catch (err) {
+    console.error('[Kitsunify Engine] ❌ Error descargando motor:', err.message);
+  }
+  return resolvedYtdlp;
+}
+
+// Auto-run verification on boot
+ensureYtdlpBinary();
 
 // Temporary directory for downloading before uploading to Telegram vault
 const TMP_DOWNLOAD_DIR = path.join(__dirname, 'temp_downloads');
@@ -120,7 +173,7 @@ function broadcastSSE(data) {
 }
 
 // ─── 5. YouTube Search (Protected + Sanitized) ─────────────────────────────
-app.get('/api/search', auth.requireAuth, (req, res) => {
+app.get('/api/search', auth.requireAuth, async (req, res) => {
   const rawQuery = req.query.q;
   if (!rawQuery || typeof rawQuery !== 'string') {
     return res.json({ results: [] });
@@ -132,8 +185,10 @@ app.get('/api/search', auth.requireAuth, (req, res) => {
     return res.json({ results: [] });
   }
 
+  await ensureYtdlpBinary();
+
   const results = [];
-  const ytdlp = spawn(YTDLP_BIN, [
+  const ytdlp = spawn(resolvedYtdlp, [
     `ytsearch15:${query}`,
     '--flat-playlist',
     '--dump-json',
@@ -175,7 +230,7 @@ app.get('/api/search', auth.requireAuth, (req, res) => {
 });
 
 // ─── 6. Download & Save to Telegram Vault (Admin Only) ─────────────────────
-app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
+app.post('/api/download', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   const { url, title, id, artist, duration, thumbnail } = req.body;
 
   // Strict YouTube URL validation
@@ -202,12 +257,13 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
 
   const tempOutputFile = path.join(TMP_DOWNLOAD_DIR, `${downloadId}.mp3`);
 
-  const ytdlp = spawn(YTDLP_BIN, [
+  await ensureYtdlpBinary();
+
+  const ytdlpArgs = [
     url,
     '-x',
     '--audio-format', 'mp3',
     '--audio-quality', '0',
-    '--embed-thumbnail',
     '--embed-metadata',
     '--parse-metadata', 'uploader:%(artist)s',
     '--output', path.join(TMP_DOWNLOAD_DIR, `${downloadId}.%(ext)s`),
@@ -216,7 +272,14 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
     '--newline',
     '--progress-template', 'download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
     '--no-warnings'
-  ]);
+  ];
+
+  if (ffmpegPath) {
+    ytdlpArgs.push('--ffmpeg-location', ffmpegPath);
+  }
+
+  const ytdlp = spawn(resolvedYtdlp, ytdlpArgs);
+  let stderrLog = '';
 
   ytdlp.stdout.on('data', (chunk) => {
     const lines = chunk.toString().split('\n');
@@ -241,6 +304,7 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
 
   ytdlp.stderr.on('data', (chunk) => {
     const text = chunk.toString();
+    stderrLog += text;
     if (text.includes('Destination') || text.includes('Post-process')) {
       const dl = activeDownloads.get(downloadId);
       if (dl) {
@@ -251,14 +315,28 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
     }
   });
 
+  ytdlp.on('error', (err) => {
+    console.error(`[yt-dlp spawn error]:`, err);
+    const dl = activeDownloads.get(downloadId);
+    if (dl) {
+      dl.status = 'error';
+      dl.error = `Error al iniciar motor: ${err.message}`;
+      broadcastSSE({ type: 'progress', id: downloadId, ...dl });
+      setTimeout(() => activeDownloads.delete(downloadId), 15000);
+    }
+  });
+
   ytdlp.on('close', async (code) => {
     const dl = activeDownloads.get(downloadId);
     if (!dl) return;
 
     if (code !== 0) {
+      console.error(`[yt-dlp error code ${code}]:`, stderrLog);
+      const cleanError = stderrLog.split('\n').filter(l => l.includes('ERROR:')).pop() || `Error de descarga (código ${code})`;
       dl.status = 'error';
+      dl.error = cleanError.replace('ERROR:', '').trim();
       broadcastSSE({ type: 'progress', id: downloadId, ...dl });
-      setTimeout(() => activeDownloads.delete(downloadId), 10000);
+      setTimeout(() => activeDownloads.delete(downloadId), 15000);
       return;
     }
 
@@ -305,10 +383,12 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, (req, res) => {
     } catch (uploadErr) {
       console.error('[Telegram Vault] ❌ Error subiendo a Telegram:', uploadErr.message);
       dl.status = 'error';
+      dl.error = `Error al subir a Bóveda: ${uploadErr.message}`;
       broadcastSSE({ type: 'progress', id: downloadId, ...dl });
+      setTimeout(() => activeDownloads.delete(downloadId), 15000);
     }
 
-    setTimeout(() => activeDownloads.delete(downloadId), 10000);
+    setTimeout(() => activeDownloads.delete(downloadId), 15000);
   });
 
   res.json({ id: downloadId, status: 'started' });
