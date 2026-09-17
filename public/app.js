@@ -46,8 +46,18 @@ let isSearching = false;
 let currentlyPlaying = null;
 let eventSource = null;
 
+// ─── Cloud Server API Endpoint ──────────────────────────────────
+// When running inside the Android APK, requests must point to the Render cloud.
+// When running in a web browser on Render or local dev (localhost:3000), relative path is used.
+const isNativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) ||
+                    window.location.protocol === 'capacitor:' ||
+                    (window.location.hostname === 'localhost' && !window.location.port);
+
+const API_BASE = isNativeApp ? (localStorage.getItem('kitsunify_server_url') || 'https://kitsunify.onrender.com') : '';
+
 // ─── Authenticated Fetch Helper ──────────────────────────────────
 async function authFetch(url, options = {}) {
+  const fullUrl = url.startsWith('/') ? `${API_BASE}${url}` : url;
   const headers = options.headers || {};
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
@@ -57,7 +67,7 @@ async function authFetch(url, options = {}) {
     options.body = JSON.stringify(options.body);
   }
 
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(fullUrl, { ...options, headers });
 
   if (res.status === 401) {
     logout();
@@ -75,7 +85,7 @@ async function checkAuth() {
   }
 
   try {
-    const res = await fetch('/api/auth/me', {
+    const res = await fetch(`${API_BASE}/api/auth/me`, {
       headers: { 'Authorization': `Bearer ${authToken}` }
     });
 
@@ -90,7 +100,17 @@ async function checkAuth() {
       logout();
     }
   } catch (err) {
-    showAuthModal();
+    // If offline, allow access to cached offline songs
+    if (authToken) {
+      console.warn('Servidor inaccesible, modo offline:', err);
+      currentUser = { username: 'Modo Offline', role: 'listener' };
+      hideAuthModal();
+      setupUserUI();
+      loadOfflineLibrary();
+      showToast('📱 Modo Offline (sin conexión al servidor)', 'info');
+    } else {
+      showAuthModal();
+    }
   }
 }
 
@@ -123,8 +143,14 @@ async function handleLogin() {
   const password = authPassword.value;
   authError.style.display = 'none';
 
+  if (!username || !password) {
+    authError.textContent = 'Por favor ingresa usuario y contraseña';
+    authError.style.display = 'block';
+    return;
+  }
+
   try {
-    const res = await fetch('/api/auth/login', {
+    const res = await fetch(`${API_BASE}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password })
@@ -148,7 +174,8 @@ async function handleLogin() {
     loadLibrary();
     showToast(`Bienvenido, ${currentUser.username}! 🦊`, 'success');
   } catch (err) {
-    authError.textContent = 'Error de conexión con el servidor';
+    console.error('Error de login:', err);
+    authError.textContent = 'No se pudo conectar al servidor en la nube. Revisa tu conexión a internet.';
     authError.style.display = 'block';
   }
 }
@@ -368,7 +395,7 @@ async function startDownload(id, url, title, artist, duration, thumbnail) {
 function connectSSE() {
   if (eventSource || !authToken) return;
 
-  eventSource = new EventSource(`/api/downloads/progress?token=${encodeURIComponent(authToken)}`);
+  eventSource = new EventSource(`${API_BASE}/api/downloads/progress?token=${encodeURIComponent(authToken)}`);
 
   eventSource.onmessage = (event) => {
     try {
@@ -661,7 +688,8 @@ function playLibrarySong(streamPath, title, artist, fileId) {
 
   currentlyPlaying = streamPath;
   // Authenticated stream URL
-  audioPlayer.src = `${streamPath}?token=${encodeURIComponent(authToken)}`;
+  const fullStreamUrl = streamPath.startsWith('/') ? `${API_BASE}${streamPath}` : streamPath;
+  audioPlayer.src = `${fullStreamUrl}?token=${encodeURIComponent(authToken)}`;
   audioPlayer.play().catch(e => {
     showToast('Error al reproducir audio', 'error');
   });
