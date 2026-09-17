@@ -103,16 +103,67 @@ if (!fs.existsSync(TMP_DOWNLOAD_DIR)) {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── 2. Healthcheck for Keep-Alive (cron-job.org) ───────────────────────────
-// Stays public so cron-job.org keeps Render awake 24/7 without authentication
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+
+// ─── 2. Healthcheck & Diagnostics ──────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'Kitsunify 🦊',
     uptime: Math.floor(process.uptime()),
     vaultSongs: vaultDb.getSongs().length,
+    hasCookies: fs.existsSync(COOKIES_FILE),
     timestamp: Date.now()
   });
+});
+
+app.get('/api/diag/test-yt', async (req, res) => {
+  const client = req.query.client || 'android';
+  const id = req.query.id || 'msGuqelopMA';
+  await ensureYtdlpBinary();
+  const { execFile } = require('child_process');
+  const args = [
+    `https://www.youtube.com/watch?v=${id}`,
+    '--dump-json',
+    '--no-warnings'
+  ];
+  if (client !== 'none') {
+    args.push('--extractor-args', `youtube:player_client=${client}`);
+  }
+  if (fs.existsSync(COOKIES_FILE)) {
+    args.push('--cookies', COOKIES_FILE);
+  }
+  execFile(resolvedYtdlp, args, { timeout: 25000 }, (err, stdout, stderr) => {
+    let title = null;
+    if (stdout) {
+      try { title = JSON.parse(stdout).title; } catch (e) {}
+    }
+    res.json({
+      client,
+      success: !err && !!title,
+      title,
+      error: err ? err.message : null,
+      stderr: stderr ? stderr.trim() : null
+    });
+  });
+});
+
+app.post('/api/admin/cookies', auth.requireAuth, auth.requireAdmin, (req, res) => {
+  const { cookies } = req.body;
+  if (!cookies || typeof cookies !== 'string') {
+    return res.status(400).json({ error: 'Contenido de cookies inválido' });
+  }
+  fs.writeFileSync(COOKIES_FILE, cookies.trim());
+  res.json({ success: true, message: 'Cookies guardadas correctamente' });
+});
+
+app.get('/api/admin/cookies/status', auth.requireAuth, auth.requireAdmin, (req, res) => {
+  const exists = fs.existsSync(COOKIES_FILE);
+  let size = 0;
+  if (exists) {
+    try { size = fs.statSync(COOKIES_FILE).size; } catch (e) {}
+  }
+  res.json({ hasCookies: exists && size > 50, size });
 });
 
 // ─── 3. Authentication Endpoints ───────────────────────────────────────────
@@ -187,15 +238,22 @@ app.get('/api/search', auth.requireAuth, async (req, res) => {
 
   await ensureYtdlpBinary();
 
-  const results = [];
-  const ytdlp = spawn(resolvedYtdlp, [
+  const searchArgs = [
     `ytsearch15:${query}`,
     '--flat-playlist',
     '--dump-json',
-    '--extractor-args', 'youtube:player_client=android,web',
     '--no-warnings',
     '--ignore-errors'
-  ]);
+  ];
+
+  if (fs.existsSync(COOKIES_FILE)) {
+    searchArgs.push('--cookies', COOKIES_FILE);
+  } else {
+    searchArgs.push('--extractor-args', 'youtube:player_client=android');
+  }
+
+  const results = [];
+  const ytdlp = spawn(resolvedYtdlp, searchArgs);
 
   ytdlp.stdout.on('data', (chunk) => {
     const lines = chunk.toString().split('\n').filter(l => l.trim());
@@ -268,11 +326,16 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, async (req, res) 
     '--parse-metadata', 'uploader:%(artist)s',
     '--output', path.join(TMP_DOWNLOAD_DIR, `${downloadId}.%(ext)s`),
     '--no-playlist',
-    '--extractor-args', 'youtube:player_client=android,web',
     '--newline',
     '--progress-template', 'download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
     '--no-warnings'
   ];
+
+  if (fs.existsSync(COOKIES_FILE)) {
+    ytdlpArgs.push('--cookies', COOKIES_FILE);
+  } else {
+    ytdlpArgs.push('--extractor-args', 'youtube:player_client=android');
+  }
 
   if (ffmpegPath) {
     ytdlpArgs.push('--ffmpeg-location', ffmpegPath);

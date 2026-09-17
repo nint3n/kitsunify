@@ -198,7 +198,79 @@ function setupUserUI() {
   userRoleBadge.textContent = isAdmin ? 'ADMIN 🛡️' : 'OYENTE 👤';
   userRoleBadge.style.borderColor = isAdmin ? 'rgba(255, 107, 53, 0.4)' : 'rgba(29, 185, 84, 0.4)';
   userRoleBadge.style.color = isAdmin ? '#ff8a00' : '#1ed760';
+
+  const btnOpenCookies = $('#btnOpenCookiesModal');
+  if (btnOpenCookies) {
+    btnOpenCookies.style.display = isAdmin ? 'inline-block' : 'none';
+  }
 }
+
+// ─── Cookies Management (Admin) ──────────────────────────────────
+async function openCookiesModal() {
+  const overlay = $('#cookiesOverlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  const statusEl = $('#cookiesStatusText');
+  statusEl.textContent = 'Consultando estado...';
+  try {
+    const res = await authFetch('/api/admin/cookies/status');
+    const data = await res.json();
+    if (data.hasCookies) {
+      statusEl.textContent = `✅ Cookies activas (${(data.size / 1024).toFixed(1)} KB) - Bypass Anti-Bot OK`;
+      statusEl.style.color = '#1ed760';
+    } else {
+      statusEl.textContent = '⚠️ Sin cookies (usando cliente móvil Android)';
+      statusEl.style.color = '#ff8a00';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Modo Offline / Servidor inaccesible';
+  }
+}
+
+async function saveCookies() {
+  const input = $('#cookiesTextInput');
+  const cookies = input.value.trim();
+  if (!cookies) {
+    showToast('Pega el contenido del archivo cookies.txt', 'error');
+    return;
+  }
+  try {
+    const res = await authFetch('/api/admin/cookies', {
+      method: 'POST',
+      body: { cookies }
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('✅ Cookies guardadas! Bypass anti-bot activado', 'success');
+      $('#cookiesOverlay').style.display = 'none';
+      input.value = '';
+    } else {
+      showToast(`Error: ${data.error}`, 'error');
+    }
+  } catch (e) {
+    showToast('Error al guardar cookies en el servidor', 'error');
+  }
+}
+
+async function deleteCookies() {
+  try {
+    await authFetch('/api/admin/cookies', {
+      method: 'POST',
+      body: { cookies: ' ' }
+    });
+    showToast('Cookies eliminadas', 'info');
+    $('#cookiesOverlay').style.display = 'none';
+  } catch (e) {}
+}
+
+const btnOpenCookiesEl = $('#btnOpenCookiesModal');
+if (btnOpenCookiesEl) btnOpenCookiesEl.addEventListener('click', openCookiesModal);
+const btnCloseCookiesEl = $('#btnCloseCookiesModal');
+if (btnCloseCookiesEl) btnCloseCookiesEl.addEventListener('click', () => $('#cookiesOverlay').style.display = 'none');
+const btnSaveCookiesEl = $('#btnSaveCookies');
+if (btnSaveCookiesEl) btnSaveCookiesEl.addEventListener('click', saveCookies);
+const btnDeleteCookiesEl = $('#btnDeleteCookies');
+if (btnDeleteCookiesEl) btnDeleteCookiesEl.addEventListener('click', deleteCookies);
 
 async function handleLogin() {
   const username = authUsername.value.trim();
