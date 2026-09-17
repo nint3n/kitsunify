@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Compilar Kitsunify APK
@@ -26,11 +29,11 @@ jobs:
       - name: Sincronizar Capacitor Android
         run: npx cap sync android
 
-      - name: Configurar Java 17
+      - name: Configurar Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: 17
+          java-version: 21
 
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v3
