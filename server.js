@@ -105,6 +105,37 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
+function sanitizeCookies(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let content = raw.trim();
+  if (content.charCodeAt(0) === 0xFEFF) {
+    content = content.slice(1);
+  }
+  return content.replace(/\r\n/g, '\n').trim() + '\n';
+}
+
+function initCookies() {
+  if (process.env.YOUTUBE_COOKIES) {
+    try {
+      const clean = sanitizeCookies(process.env.YOUTUBE_COOKIES);
+      if (clean.length > 50) fs.writeFileSync(COOKIES_FILE, clean, 'utf8');
+    } catch (e) {}
+  } else if (process.env.YOUTUBE_COOKIES_BASE64) {
+    try {
+      const decoded = Buffer.from(process.env.YOUTUBE_COOKIES_BASE64, 'base64').toString('utf8');
+      const clean = sanitizeCookies(decoded);
+      if (clean.length > 50) fs.writeFileSync(COOKIES_FILE, clean, 'utf8');
+    } catch (e) {}
+  } else if (fs.existsSync(COOKIES_FILE)) {
+    try {
+      const existing = fs.readFileSync(COOKIES_FILE, 'utf8');
+      const clean = sanitizeCookies(existing);
+      if (clean !== existing) fs.writeFileSync(COOKIES_FILE, clean, 'utf8');
+    } catch (e) {}
+  }
+}
+initCookies();
+
 // ─── 2. Healthcheck & Diagnostics ──────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({
@@ -112,7 +143,7 @@ app.get('/api/health', (req, res) => {
     server: 'Kitsunify 🦊',
     uptime: Math.floor(process.uptime()),
     vaultSongs: vaultDb.getSongs().length,
-    hasCookies: fs.existsSync(COOKIES_FILE),
+    hasCookies: fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 50,
     timestamp: Date.now()
   });
 });
@@ -125,15 +156,30 @@ app.get('/api/diag/test-yt', async (req, res) => {
   const args = [
     `https://www.youtube.com/watch?v=${id}`,
     '--dump-json',
-    '--no-warnings'
+    '--no-warnings',
+    '-f', 'bestaudio/best',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
   ];
   if (client !== 'none') {
     args.push('--extractor-args', `youtube:player_client=${client}`);
   }
-  if (fs.existsSync(COOKIES_FILE)) {
-    args.push('--cookies', COOKIES_FILE);
+  let tempCookie = null;
+  if (fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 50) {
+    tempCookie = path.join(TMP_DOWNLOAD_DIR, `diag_cookies_${Date.now()}.txt`);
+    try {
+      fs.copyFileSync(COOKIES_FILE, tempCookie);
+      args.push('--cookies', tempCookie);
+    } catch (e) {
+      args.push('--cookies', COOKIES_FILE);
+    }
+  }
+  if (ffmpegPath) {
+    args.push('--ffmpeg-location', ffmpegPath);
   }
   execFile(resolvedYtdlp, args, { timeout: 25000 }, (err, stdout, stderr) => {
+    if (tempCookie && fs.existsSync(tempCookie)) {
+      try { fs.unlinkSync(tempCookie); } catch (e) {}
+    }
     let title = null;
     if (stdout) {
       try { title = JSON.parse(stdout).title; } catch (e) {}
@@ -150,11 +196,12 @@ app.get('/api/diag/test-yt', async (req, res) => {
 
 app.post('/api/admin/cookies', auth.requireAuth, auth.requireAdmin, (req, res) => {
   const { cookies } = req.body;
-  if (!cookies || typeof cookies !== 'string') {
-    return res.status(400).json({ error: 'Contenido de cookies inválido' });
+  const clean = sanitizeCookies(cookies);
+  if (!clean || clean.length < 50 || !clean.includes('youtube.com')) {
+    return res.status(400).json({ error: 'Contenido de cookies inválido o no reconocido como formato Netscape de YouTube' });
   }
-  fs.writeFileSync(COOKIES_FILE, cookies.trim());
-  res.json({ success: true, message: 'Cookies guardadas correctamente' });
+  fs.writeFileSync(COOKIES_FILE, clean, 'utf8');
+  res.json({ success: true, message: 'Cookies guardadas y sanitizadas correctamente' });
 });
 
 app.get('/api/admin/cookies/status', auth.requireAuth, auth.requireAdmin, (req, res) => {
@@ -322,20 +369,29 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, async (req, res) 
     '-x',
     '--audio-format', 'mp3',
     '--audio-quality', '0',
+    '-f', 'bestaudio/best',
     '--embed-metadata',
     '--parse-metadata', 'uploader:%(artist)s',
     '--output', path.join(TMP_DOWNLOAD_DIR, `${downloadId}.%(ext)s`),
     '--no-playlist',
     '--newline',
     '--progress-template', 'download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
-    '--no-warnings'
+    '--no-warnings',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
   ];
 
-  if (fs.existsSync(COOKIES_FILE)) {
-    ytdlpArgs.push('--cookies', COOKIES_FILE);
-  } else {
-    ytdlpArgs.push('--extractor-args', 'youtube:player_client=android');
+  let tempCookieFile = null;
+  if (fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 50) {
+    tempCookieFile = path.join(TMP_DOWNLOAD_DIR, `cookies_${downloadId}.txt`);
+    try {
+      fs.copyFileSync(COOKIES_FILE, tempCookieFile);
+      ytdlpArgs.push('--cookies', tempCookieFile);
+    } catch (e) {
+      ytdlpArgs.push('--cookies', COOKIES_FILE);
+    }
   }
+
+  ytdlpArgs.push('--extractor-args', 'youtube:player_client=android');
 
   if (ffmpegPath) {
     ytdlpArgs.push('--ffmpeg-location', ffmpegPath);
@@ -381,6 +437,9 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, async (req, res) 
   ytdlp.on('error', (err) => {
     console.error(`[yt-dlp spawn error]:`, err);
     const dl = activeDownloads.get(downloadId);
+    if (tempCookieFile && fs.existsSync(tempCookieFile)) {
+      try { fs.unlinkSync(tempCookieFile); } catch (e) {}
+    }
     if (dl) {
       dl.status = 'error';
       dl.error = `Error al iniciar motor: ${err.message}`;
@@ -390,6 +449,9 @@ app.post('/api/download', auth.requireAuth, auth.requireAdmin, async (req, res) 
   });
 
   ytdlp.on('close', async (code) => {
+    if (tempCookieFile && fs.existsSync(tempCookieFile)) {
+      try { fs.unlinkSync(tempCookieFile); } catch (e) {}
+    }
     const dl = activeDownloads.get(downloadId);
     if (!dl) return;
 
