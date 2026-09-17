@@ -1,0 +1,71 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compilar Kitsunify APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Instalar Dependencias
+        run: npm install
+
+      - name: Sincronizar Capacitor Android
+        run: npx cap sync android
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Otorgar permisos a gradlew
+        run: chmod +x android/gradlew
+
+      - name: Compilar APK con Gradle
+        run: cd android && ./gradlew assembleDebug --stacktrace
+
+      - name: Renombrar APK
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk kitsunify.apk
+
+      - name: Subir APK como Artefacto Descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kitsunify-APK
+          path: kitsunify.apk
+          retention-days: 30
+
+      - name: Publicar Release con APK
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        with:
+          tag_name: v2.0-${{ github.run_number }}
+          name: Kitsunify ULTRA APK v2.0
+          body: |
+            🦊 **Kitsunify ULTRA v2.0 — APK Nativo para Android**
+            
+            - ☁️ Bóveda Ilimitada en Telegram Cloud (0 MB en el teléfono).
+            - 📱 Modo Offline: Escucha tus canciones guardadas sin internet.
+            - 🔒 Seguridad Robusta: Bcrypt + JWT + Anti-Fuerza Bruta.
+            
+            Descarga el archivo `kitsunify.apk` e instálalo en tu celular Android.
+          files: kitsunify.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

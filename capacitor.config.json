@@ -1,0 +1,9 @@
+{
+  "appId": "com.kitsunify.app",
+  "appName": "Kitsunify",
+  "webDir": "public",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}

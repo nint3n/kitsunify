@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "username": "admin",
+    "passwordHash": "$2b$10$S/kiA8N9vuduqGBNXpog7uAh5VUeAB8ifpaYIp58nQZXxzWmBuW.C",
+    "role": "admin",
+    "createdAt": "2026-09-17T04:43:41.136Z"
+  },
+  "invitado": {
+    "username": "invitado",
+    "passwordHash": "$2b$10$JfoZXeflQB2wYjV3B/8fgeBCCzXOmIHnqpVKF11JBENBVnm4d3qxW",
+    "role": "listener",
+    "createdAt": "2026-09-17T04:43:41.256Z"
+  }
+}
